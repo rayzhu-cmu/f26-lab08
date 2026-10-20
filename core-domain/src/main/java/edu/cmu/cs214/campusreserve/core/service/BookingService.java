@@ -1,6 +1,8 @@
 package edu.cmu.cs214.campusreserve.core.service;
 
 import edu.cmu.cs214.campusreserve.core.domain.Booking;
+import edu.cmu.cs214.campusreserve.core.domain.ModificationResult;
+import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
 import edu.cmu.cs214.campusreserve.core.domain.BookingOutcome;
 import edu.cmu.cs214.campusreserve.core.domain.BookingRequest;
 import edu.cmu.cs214.campusreserve.core.domain.CancellationResult;
@@ -122,6 +124,57 @@ public final class BookingService {
         bookings.save(booking);
         publish(BookingCreatedEvent.of(booking, now()));
         return new BookingOutcome.Confirmed(booking);
+    }
+
+    /**
+     * Modifies an upcoming booking in place. Callers supply the desired complete
+     * interval and attendee count; omitted HTTP fields are resolved by the handler.
+     * All rejection checks precede writes and event publication.
+     */
+    public ModificationResult modifyBooking(String bookingId, String requesterId,
+                                            TimeInterval interval, int attendees) {
+        Objects.requireNonNull(bookingId, "bookingId");
+        Objects.requireNonNull(requesterId, "requesterId");
+        Objects.requireNonNull(interval, "interval");
+        Optional<Booking> stored = bookings.findById(bookingId);
+        if (stored.isEmpty()) {
+            return ModificationResult.rejected(RejectionReason.BOOKING_NOT_FOUND);
+        }
+        Booking before = stored.get();
+        // Modification and cancellation share ownership, status and timing rules.
+        Optional<RejectionReason> failure = rules.checkCancellable(before, requesterId);
+        if (failure.isPresent()) {
+            return ModificationResult.rejected(failure.get());
+        }
+        if (before.interval().equals(interval) && before.attendees() == attendees) {
+            return new ModificationResult.Modified(before, List.of());
+        }
+        Optional<Room> room = rooms.findById(before.roomId());
+        if (room.isEmpty()) {
+            return ModificationResult.rejected(RejectionReason.ROOM_NOT_FOUND);
+        }
+        BookingRequest request = BookingRequest.of(before.roomId(), before.userId(), interval, attendees);
+        failure = rules.checkRequest(request, room.get());
+        if (failure.isPresent()) {
+            return ModificationResult.rejected(failure.get());
+        }
+        List<Booking> roomBookings = bookings.findActiveByRoom(before.roomId()).stream()
+            .filter(booking -> !booking.id().equals(bookingId)).toList();
+        if (conflictChecker.hasConflict(roomBookings, interval)) {
+            return ModificationResult.rejected(RejectionReason.ROOM_UNAVAILABLE);
+        }
+        List<Booking> ownBookings = bookings.findActiveByUser(before.userId()).stream()
+            .filter(booking -> !booking.id().equals(bookingId)).toList();
+        if (conflictChecker.hasConflict(ownBookings, interval)) {
+            return ModificationResult.rejected(RejectionReason.USER_DOUBLE_BOOKED);
+        }
+        Instant modifiedAt = now();
+        Booking after = before.modified(interval, attendees, modifiedAt);
+        bookings.save(after);
+        publish(BookingModifiedEvent.of(before, after, modifiedAt));
+        List<CancellationResult.Promotion> promotions = before.interval().equals(interval)
+            ? List.of() : promoteWaitlist(before.roomId());
+        return new ModificationResult.Modified(after, promotions);
     }
 
     /**

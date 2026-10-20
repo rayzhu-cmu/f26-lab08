@@ -1,0 +1,626 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index fa5ef49..7a2d5c2 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -76,7 +76,9 @@ or fail on, delivery.
+ 
+ - Only `storage` writes the event log. `EventLogFormat` is the single place the
+   line shape is decided, and the event types (currently `booking-created`,
+-  `booking-cancelled`, and `waitlist-promoted`) are declared in `core-domain`.
++  `booking-cancelled`, `waitlist-promoted`, and `booking-modified`) are declared in `core-domain`.
++  The modification event is declared by Task 1; its log-format registration and
++  Python reader support are pending Task 2, so the full event contract is not yet complete.
+ - Only `analytics` reads `events.jsonl`. The Python package never opens a Java
+   store, never imports Java, and never writes the log back.
+ - The Java side writes JSON by hand and parses none. There is no JSON library in
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index 724fd05..ce5ea0d 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -122,10 +122,13 @@ BookingsHandler                  BookCommand
+ ## The event log
+ 
+ `storage` owns the log. `EventLogFormat` is the one place a line's shape is
+-decided, and it writes JSON by hand. The event types, currently three, are
++decided, and it writes JSON by hand. The event types, currently four, are
+ declared in `core-domain` (`BookingCreatedEvent`, `BookingCancelledEvent`,
+-`WaitlistPromotedEvent`) and their wire names are `booking-created`,
+-`booking-cancelled`, and `waitlist-promoted`.
++`WaitlistPromotedEvent`, `BookingModifiedEvent`) and their wire names are `booking-created`,
++`booking-cancelled`, `waitlist-promoted`, and `booking-modified`.
++Task 1 declares and publishes the modification event in the domain. Task 2
++will register its wire format and add Python reader support; that integration
++is not complete yet. The HTTP modification surface is also pending.
+ 
+ Two writers ship:
+ 
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/Booking.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/Booking.java
+index 5889591..5267b6e 100644
+--- a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/Booking.java
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/Booking.java
+@@ -2,6 +2,8 @@ package edu.cmu.cs214.campusreserve.core.domain;
+ 
+ import java.time.Instant;
+ import java.util.Objects;
++import java.util.List;
++import java.util.ArrayList;
+ 
+ /**
+  * A booking: one user holds one room over one interval.
+@@ -16,9 +18,17 @@ public record Booking(
+     TimeInterval interval,
+     int attendees,
+     BookingStatus status,
+-    Instant createdAt) {
++    Instant createdAt,
++    List<BookingModification> history) {
++
++    /** Compatibility constructor for bookings with no modification history. */
++    public Booking(String id, String roomId, String userId, TimeInterval interval,
++                   int attendees, BookingStatus status, Instant createdAt) {
++        this(id, roomId, userId, interval, attendees, status, createdAt, List.of());
++    }
+ 
+     public Booking {
++        history = List.copyOf(history);
+         id = Identifiers.require(id, "booking id");
+         roomId = Identifiers.require(roomId, "room id");
+         userId = Identifiers.require(userId, "user id");
+@@ -38,7 +48,19 @@ public record Booking(
+ 
+     /** Returns a cancelled copy of this booking. */
+     public Booking cancelled() {
+-        return new Booking(id, roomId, userId, interval, attendees, BookingStatus.CANCELLED, createdAt);
++        return new Booking(id, roomId, userId, interval, attendees, BookingStatus.CANCELLED, createdAt, history);
++    }
++
++    /** Returns a new snapshot, leaving earlier snapshots and their history unchanged. */
++    public Booking modified(TimeInterval newInterval, int newAttendees, Instant modifiedAt) {
++        Objects.requireNonNull(newInterval, "newInterval");
++        Objects.requireNonNull(modifiedAt, "modifiedAt");
++        if (interval.equals(newInterval) && attendees == newAttendees) {
++            return this;
++        }
++        List<BookingModification> changes = new ArrayList<>(history);
++        changes.add(new BookingModification(interval, attendees, newInterval, newAttendees, modifiedAt));
++        return new Booking(id, roomId, userId, newInterval, newAttendees, status, createdAt, changes);
+     }
+ 
+     /** Does this booking still hold the room? */
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/BookingModification.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/BookingModification.java
+new file mode 100644
+index 0000000..d4664a5
+--- /dev/null
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/BookingModification.java
+@@ -0,0 +1,17 @@
++package edu.cmu.cs214.campusreserve.core.domain;
++
++import java.time.Instant;
++import java.util.Objects;
++
++/** Immutable before/after details of one accepted change. */
++public record BookingModification(TimeInterval oldInterval, int oldAttendees,
++                                  TimeInterval newInterval, int newAttendees, Instant modifiedAt) {
++    public BookingModification {
++        Objects.requireNonNull(oldInterval, "oldInterval");
++        Objects.requireNonNull(newInterval, "newInterval");
++        Objects.requireNonNull(modifiedAt, "modifiedAt");
++        if (oldAttendees <= 0 || newAttendees <= 0) {
++            throw new IllegalArgumentException("Attendees must be positive");
++        }
++    }
++}
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/ModificationResult.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/ModificationResult.java
+new file mode 100644
+index 0000000..c546e1d
+--- /dev/null
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/domain/ModificationResult.java
+@@ -0,0 +1,31 @@
++package edu.cmu.cs214.campusreserve.core.domain;
++
++import java.util.List;
++import java.util.Objects;
++import java.util.Optional;
++
++/** The updated booking and promotions, or a rejection with no state changes. */
++public sealed interface ModificationResult {
++    /** Includes successful no-ops; their booking and history remain unchanged. */
++    record Modified(Booking booking, List<CancellationResult.Promotion> promotions)
++        implements ModificationResult {
++        public Modified {
++            Objects.requireNonNull(booking, "booking");
++            promotions = List.copyOf(promotions);
++        }
++    }
++
++    record Rejected(RejectionReason reason) implements ModificationResult {
++        public Rejected {
++            Objects.requireNonNull(reason, "reason");
++        }
++    }
++
++    static ModificationResult rejected(RejectionReason reason) {
++        return new Rejected(reason);
++    }
++
++    default Optional<RejectionReason> rejectionReason() {
++        return this instanceof Rejected rejected ? Optional.of(rejected.reason()) : Optional.empty();
++    }
++}
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/BookingModifiedEvent.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/BookingModifiedEvent.java
+new file mode 100644
+index 0000000..e2fe03b
+--- /dev/null
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/BookingModifiedEvent.java
+@@ -0,0 +1,32 @@
++package edu.cmu.cs214.campusreserve.core.events;
++
++import edu.cmu.cs214.campusreserve.core.domain.Booking;
++import edu.cmu.cs214.campusreserve.core.domain.TimeInterval;
++import java.time.Instant;
++import java.util.Objects;
++
++/** Current state plus the old details needed by modification subscribers. */
++public record BookingModifiedEvent(Instant occurredAt, String bookingId, String roomId,
++                                   String userId, TimeInterval interval, int attendees,
++                                   TimeInterval oldInterval, int oldAttendees) implements DomainEvent {
++    public static final String TYPE = "booking-modified";
++
++    public BookingModifiedEvent {
++        Objects.requireNonNull(occurredAt, "occurredAt");
++        Objects.requireNonNull(bookingId, "bookingId");
++        Objects.requireNonNull(roomId, "roomId");
++        Objects.requireNonNull(userId, "userId");
++        Objects.requireNonNull(interval, "interval");
++        Objects.requireNonNull(oldInterval, "oldInterval");
++    }
++
++    public static BookingModifiedEvent of(Booking before, Booking after, Instant occurredAt) {
++        return new BookingModifiedEvent(occurredAt, after.id(), after.roomId(), after.userId(),
++            after.interval(), after.attendees(), before.interval(), before.attendees());
++    }
++
++    @Override
++    public String type() {
++        return TYPE;
++    }
++}
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/DomainEvent.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/DomainEvent.java
+index fa8c2e0..2e65a54 100644
+--- a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/DomainEvent.java
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/events/DomainEvent.java
+@@ -11,7 +11,7 @@ import java.time.Instant;
+  * reads the event log, so they are declared once here and nowhere else.
+  */
+ public sealed interface DomainEvent
+-    permits BookingCreatedEvent, BookingCancelledEvent, WaitlistPromotedEvent {
++    permits BookingCreatedEvent, BookingCancelledEvent, WaitlistPromotedEvent, BookingModifiedEvent {
+ 
+     /** The wire name of this event, for example {@code booking-created}. */
+     String type();
+diff --git a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/service/BookingService.java b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/service/BookingService.java
+index 47113a6..4e8d04a 100644
+--- a/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/service/BookingService.java
++++ b/core-domain/src/main/java/edu/cmu/cs214/campusreserve/core/service/BookingService.java
+@@ -1,6 +1,8 @@
+ package edu.cmu.cs214.campusreserve.core.service;
+ 
+ import edu.cmu.cs214.campusreserve.core.domain.Booking;
++import edu.cmu.cs214.campusreserve.core.domain.ModificationResult;
++import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
+ import edu.cmu.cs214.campusreserve.core.domain.BookingOutcome;
+ import edu.cmu.cs214.campusreserve.core.domain.BookingRequest;
+ import edu.cmu.cs214.campusreserve.core.domain.CancellationResult;
+@@ -124,6 +126,57 @@ public final class BookingService {
+         return new BookingOutcome.Confirmed(booking);
+     }
+ 
++    /**
++     * Modifies an upcoming booking in place. Callers supply the desired complete
++     * interval and attendee count; omitted HTTP fields are resolved by the handler.
++     * All rejection checks precede writes and event publication.
++     */
++    public ModificationResult modifyBooking(String bookingId, String requesterId,
++                                            TimeInterval interval, int attendees) {
++        Objects.requireNonNull(bookingId, "bookingId");
++        Objects.requireNonNull(requesterId, "requesterId");
++        Objects.requireNonNull(interval, "interval");
++        Optional<Booking> stored = bookings.findById(bookingId);
++        if (stored.isEmpty()) {
++            return ModificationResult.rejected(RejectionReason.BOOKING_NOT_FOUND);
++        }
++        Booking before = stored.get();
++        // Modification and cancellation share ownership, status and timing rules.
++        Optional<RejectionReason> failure = rules.checkCancellable(before, requesterId);
++        if (failure.isPresent()) {
++            return ModificationResult.rejected(failure.get());
++        }
++        if (before.interval().equals(interval) && before.attendees() == attendees) {
++            return new ModificationResult.Modified(before, List.of());
++        }
++        Optional<Room> room = rooms.findById(before.roomId());
++        if (room.isEmpty()) {
++            return ModificationResult.rejected(RejectionReason.ROOM_NOT_FOUND);
++        }
++        BookingRequest request = BookingRequest.of(before.roomId(), before.userId(), interval, attendees);
++        failure = rules.checkRequest(request, room.get());
++        if (failure.isPresent()) {
++            return ModificationResult.rejected(failure.get());
++        }
++        List<Booking> roomBookings = bookings.findActiveByRoom(before.roomId()).stream()
++            .filter(booking -> !booking.id().equals(bookingId)).toList();
++        if (conflictChecker.hasConflict(roomBookings, interval)) {
++            return ModificationResult.rejected(RejectionReason.ROOM_UNAVAILABLE);
++        }
++        List<Booking> ownBookings = bookings.findActiveByUser(before.userId()).stream()
++            .filter(booking -> !booking.id().equals(bookingId)).toList();
++        if (conflictChecker.hasConflict(ownBookings, interval)) {
++            return ModificationResult.rejected(RejectionReason.USER_DOUBLE_BOOKED);
++        }
++        Instant modifiedAt = now();
++        Booking after = before.modified(interval, attendees, modifiedAt);
++        bookings.save(after);
++        publish(BookingModifiedEvent.of(before, after, modifiedAt));
++        List<CancellationResult.Promotion> promotions = before.interval().equals(interval)
++            ? List.of() : promoteWaitlist(before.roomId());
++        return new ModificationResult.Modified(after, promotions);
++    }
++
+     /**
+      * Cancels a booking on behalf of its owner, then walks the room's waitlist in
+      * arrival order and promotes every entry that now fits.
+diff --git a/core-domain/src/test/java/edu/cmu/cs214/campusreserve/core/service/BookingServiceModifyTest.java b/core-domain/src/test/java/edu/cmu/cs214/campusreserve/core/service/BookingServiceModifyTest.java
+new file mode 100644
+index 0000000..fbcbf67
+--- /dev/null
++++ b/core-domain/src/test/java/edu/cmu/cs214/campusreserve/core/service/BookingServiceModifyTest.java
+@@ -0,0 +1,272 @@
++package edu.cmu.cs214.campusreserve.core.service;
++
++import edu.cmu.cs214.campusreserve.core.domain.*;
++import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
++import edu.cmu.cs214.campusreserve.core.policy.BookingPolicy;
++import edu.cmu.cs214.campusreserve.core.support.Fixtures;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.stream.Stream;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.Arguments;
++import org.junit.jupiter.params.provider.MethodSource;
++import static org.junit.jupiter.api.Assertions.*;
++import static edu.cmu.cs214.campusreserve.core.support.Fixtures.interval;
++
++/** Regression tests added for Task 1; shipped tests remain unchanged. */
++class BookingServiceModifyTest extends BookingServiceTestBase {
++    private String initial() {
++        return bookAndGetId("r-1", "u-1", interval("10:00", "11:00"));
++    }
++
++    private ModificationResult.Modified change(String id, TimeInterval time, int attendees) {
++        return assertInstanceOf(ModificationResult.Modified.class,
++            service.modifyBooking(id, "u-1", time, attendees));
++    }
++
++    private void rejectedUnchanged(String id, String user, TimeInterval time,
++                                   int attendees, RejectionReason reason) {
++        var oldBookings = bookings.findAll();
++        var oldWaitlist = waitlist.findAll();
++        var oldEvents = publisher.published();
++        assertEquals(reason, service.modifyBooking(id, user, time, attendees).rejectionReason().orElseThrow());
++        assertEquals(oldBookings, bookings.findAll());
++        assertEquals(oldWaitlist, waitlist.findAll());
++        assertEquals(oldEvents, publisher.published());
++    }
++
++    static Stream<Arguments> successfulIntervals() {
++        return Stream.of(
++            Arguments.of("10:00", "10:30"),
++            Arguments.of("10:00", "11:30"),
++            Arguments.of("10:15", "11:15"),
++            Arguments.of("12:00", "13:00"));
++    }
++
++    @ParameterizedTest
++    @MethodSource("successfulIntervals")
++    void shorteningExtensionSelfOverlappingAndDisjointMovement(String start, String end) {
++        String id = initial();
++        Booking before = service.findBooking(id).orElseThrow();
++        var result = change(id, interval(start, end), 6);
++        Booking after = result.booking();
++        assertEquals(interval(start, end), after.interval());
++        assertEquals(6, after.attendees());
++        assertEquals(before.id(), after.id());
++        assertEquals(before.roomId(), after.roomId());
++        assertEquals(before.userId(), after.userId());
++        assertEquals(before.createdAt(), after.createdAt());
++        assertEquals(before.status(), after.status());
++        assertEquals(after, service.findBooking(id).orElseThrow());
++        assertEquals(1, bookings.count());
++        BookingModification entry = after.history().getFirst();
++        assertEquals(before.interval(), entry.oldInterval());
++        assertEquals(before.attendees(), entry.oldAttendees());
++        assertEquals(after.interval(), entry.newInterval());
++        assertEquals(6, entry.newAttendees());
++        assertEquals(clock.instant(), entry.modifiedAt());
++        BookingModifiedEvent event = publisher.ofType(BookingModifiedEvent.class).getFirst();
++        assertEquals(entry.oldInterval(), event.oldInterval());
++        assertEquals(entry.oldAttendees(), event.oldAttendees());
++        assertEquals(after.interval(), event.interval());
++        assertEquals(6, event.attendees());
++        assertEquals(entry.modifiedAt(), event.occurredAt());
++        assertEquals(id, event.bookingId());
++        assertEquals("booking-modified", event.type());
++    }
++
++    @Test
++    void roomConflictRejectsWithoutWaitlistingOrSideEffects() {
++        String id = initial();
++        bookAndGetId("r-1", "u-2", interval("11:00", "12:00"));
++        book("r-1", "u-3", interval("10:00", "10:30"));
++        rejectedUnchanged(id, "u-1", interval("10:30", "11:30"), 4, RejectionReason.ROOM_UNAVAILABLE);
++    }
++
++    @Test
++    void ownOtherRoomConflictRejects() {
++        String id = initial();
++        bookAndGetId("r-2", "u-1", interval("11:00", "12:00"));
++        rejectedUnchanged(id, "u-1", interval("10:30", "11:30"), 4, RejectionReason.USER_DOUBLE_BOOKED);
++    }
++
++    @Test
++    void halfOpenBoundariesAreAllowedInBothCalendars() {
++        String id = initial();
++        bookAndGetId("r-1", "u-2", interval("11:30", "12:30"));
++        bookAndGetId("r-2", "u-1", interval("11:30", "12:30"));
++        change(id, interval("10:30", "11:30"), 4);
++    }
++
++    @Test
++    void bookingCapDoesNotApplyToModification() {
++        build(BookingPolicy.defaults().withMaxActiveBookingsPerUser(1));
++        String id = initial();
++        change(id, interval("10:15", "11:15"), 5);
++        assertEquals(1, bookings.count());
++    }
++
++    static Stream<Arguments> invalidRequests() {
++        return Stream.of(
++            Arguments.of(interval("10:00", "10:15"), 4, RejectionReason.INTERVAL_TOO_SHORT),
++            Arguments.of(interval("10:00", "15:00"), 4, RejectionReason.INTERVAL_TOO_LONG),
++            Arguments.of(interval("10:01", "11:01"), 4, RejectionReason.INTERVAL_NOT_ALIGNED),
++            Arguments.of(TimeInterval.parse("2026-10-20T23:30:00Z", "2026-10-21T00:30:00Z"), 4,
++                RejectionReason.INTERVAL_SPANS_DAYS),
++            Arguments.of(interval("05:00", "06:00"), 4, RejectionReason.OUTSIDE_OPENING_HOURS),
++            Arguments.of(Fixtures.intervalOn("2026-10-18", "10:00", "11:00"), 4,
++                RejectionReason.INTERVAL_IN_PAST),
++            Arguments.of(Fixtures.intervalOn("2027-01-20", "10:00", "11:00"), 4,
++                RejectionReason.TOO_FAR_IN_ADVANCE),
++            Arguments.of(interval("10:00", "11:00"), 11, RejectionReason.ATTENDEES_EXCEED_CAPACITY));
++    }
++
++    @ParameterizedTest
++    @MethodSource("invalidRequests")
++    void requestRulesStillApply(TimeInterval time, int attendees, RejectionReason reason) {
++        rejectedUnchanged(initial(), "u-1", time, attendees, reason);
++    }
++
++    @Test
++    void inactiveRoomRejectsRealChange() {
++        String id = initial();
++        Room r = rooms.findById("r-1").orElseThrow();
++        rooms.save(new Room(r.id(), r.name(), r.building(), r.capacity(), r.kind(), false));
++        rejectedUnchanged(id, "u-1", interval("10:00", "11:00"), 5, RejectionReason.ROOM_INACTIVE);
++    }
++
++    @Test
++    void unknownBookingRejects() {
++        rejectedUnchanged("missing", "u-1", interval("10:00", "11:00"), 4,
++            RejectionReason.BOOKING_NOT_FOUND);
++    }
++
++    @Test
++    void nonOwnerCannotEvenRequestANoop() {
++        rejectedUnchanged(initial(), "u-2", interval("10:00", "11:00"), 4,
++            RejectionReason.NOT_BOOKING_OWNER);
++    }
++
++    @Test
++    void cancelledBookingRejectsNoop() {
++        String id = initial();
++        service.cancelBooking(id, "u-1");
++        rejectedUnchanged(id, "u-1", interval("10:00", "11:00"), 4,
++            RejectionReason.BOOKING_ALREADY_CANCELLED);
++    }
++
++    @Test
++    void bookingAtItsStartRejectsNoop() {
++        String id = initial();
++        clock.setTo("2026-10-20T10:00:00Z");
++        rejectedUnchanged(id, "u-1", interval("10:00", "11:00"), 4,
++            RejectionReason.BOOKING_ALREADY_STARTED);
++    }
++
++    @Test
++    void noopPreservesObjectHistoryEventsAndWaitlist() {
++        String id = initial();
++        book("r-1", "u-2", interval("10:00", "10:30"));
++        Booking before = service.findBooking(id).orElseThrow();
++        var oldWaitlist = waitlist.findAll();
++        var oldEvents = publisher.published();
++        assertSame(before, change(id, before.interval(), before.attendees()).booking());
++        assertSame(before, service.findBooking(id).orElseThrow());
++        assertEquals(oldWaitlist, waitlist.findAll());
++        assertEquals(oldEvents, publisher.published());
++        assertTrue(before.history().isEmpty());
++    }
++
++    @Test
++    void historySnapshotsStayImmutableAndSurviveCancellation() {
++        String id = initial();
++        Booking original = service.findBooking(id).orElseThrow();
++        Booking first = change(id, interval("10:15", "11:15"), 5).booking();
++        clock.advanceMinutes(1);
++        Booking second = change(id, interval("10:30", "11:30"), 6).booking();
++        assertTrue(original.history().isEmpty());
++        assertEquals(1, first.history().size());
++        assertEquals(2, second.history().size());
++        assertEquals(first.history().getFirst(), second.history().getFirst());
++        assertEquals(first.interval(), second.history().get(1).oldInterval());
++        assertTrue(second.history().get(1).modifiedAt().isAfter(first.history().getFirst().modifiedAt()));
++        assertThrows(UnsupportedOperationException.class, () -> second.history().clear());
++        var source = new ArrayList<>(second.history());
++        Booking copy = new Booking(second.id(), second.roomId(), second.userId(), second.interval(),
++            second.attendees(), second.status(), second.createdAt(), source);
++        source.clear();
++        assertEquals(2, copy.history().size());
++        service.cancelBooking(id, "u-1");
++        assertEquals(second.history(), service.findBooking(id).orElseThrow().history());
++    }
++
++    @Test
++    void shorteningPromotesFirstWaiterAndRechecksRoomForNext() {
++        String id = initial();
++        book("r-1", "u-2", interval("10:00", "10:30"));
++        book("r-1", "u-3", interval("10:00", "10:30"));
++        var result = change(id, interval("10:30", "11:00"), 4);
++        assertEquals(1, result.promotions().size());
++        assertEquals("u-2", result.promotions().getFirst().booking().userId());
++        assertEquals("u-3", waitlist.findAll().getFirst().userId());
++        assertEquals(List.of("booking-created", "booking-modified", "waitlist-promoted"), publisher.types());
++    }
++
++    @Test
++    void promotionSkipsWaiterWithNewOwnCalendarConflict() {
++        String id = initial();
++        book("r-1", "u-2", interval("10:00", "10:30"));
++        book("r-1", "u-3", interval("10:00", "10:30"));
++        bookAndGetId("r-2", "u-2", interval("10:00", "10:30"));
++        var result = change(id, interval("10:30", "11:00"), 4);
++        assertEquals("u-3", result.promotions().getFirst().booking().userId());
++        assertEquals("u-2", waitlist.findAll().getFirst().userId());
++    }
++
++    @Test
++    void extensionRunsPassButCannotPromoteOverlappingWaiter() {
++        String id = initial();
++        book("r-1", "u-2", interval("10:00", "10:30"));
++        var oldWaitlist = waitlist.findAll();
++        assertTrue(change(id, interval("10:00", "11:30"), 4).promotions().isEmpty());
++        assertEquals(oldWaitlist, waitlist.findAll());
++    }
++
++    @Test
++    void attendeeOnlyAndNoopDoNotRunPromotionButIntervalChangeDoes() {
++        // An expired waitlist entry makes a promotion pass observable even without promotion.
++        String past = bookAndGetId("r-1", "u-2", interval("08:00", "09:00"));
++        book("r-1", "u-3", interval("08:00", "09:00"));
++        String id = initial();
++        clock.setTo("2026-10-20T09:00:00Z");
++        change(id, interval("10:00", "11:00"), 4);
++        assertEquals(1, waitlist.count());
++        assertTrue(change(id, interval("10:00", "11:00"), 5).promotions().isEmpty());
++        assertEquals(1, waitlist.count());
++        change(id, interval("10:00", "11:30"), 5);
++        assertEquals(0, waitlist.count());
++        assertTrue(service.findBooking(past).orElseThrow().holdsRoom());
++    }
++
++    @Test
++    void failingPublisherDoesNotUndoChangeOrPreventPromotion() {
++        String id = initial();
++        book("r-1", "u-2", interval("10:00", "10:30"));
++        publisher.failWith(new IllegalStateException("offline"));
++        var result = change(id, interval("10:30", "11:00"), 4);
++        assertEquals(result.booking(), service.findBooking(id).orElseThrow());
++        assertEquals(1, result.promotions().size());
++        assertEquals(1, result.booking().history().size());
++    }
++
++    @Test
++    void invalidAttendeeCountThrowsWithoutSideEffects() {
++        String id = initial();
++        var old = bookings.findAll();
++        var events = publisher.published();
++        assertThrows(IllegalArgumentException.class, () -> service.modifyBooking(id, "u-1", interval("10:00", "11:00"), 0));
++        assertEquals(old, bookings.findAll());
++        assertEquals(events, publisher.published());
++    }
++}
+diff --git a/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationKind.java b/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationKind.java
+index e4386b1..78d80b3 100644
+--- a/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationKind.java
++++ b/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationKind.java
+@@ -3,6 +3,7 @@ package edu.cmu.cs214.campusreserve.notifications;
+ import edu.cmu.cs214.campusreserve.core.events.BookingCancelledEvent;
+ import edu.cmu.cs214.campusreserve.core.events.BookingCreatedEvent;
+ import edu.cmu.cs214.campusreserve.core.events.DomainEvent;
++import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
+ import edu.cmu.cs214.campusreserve.core.events.WaitlistPromotedEvent;
+ import java.util.Objects;
+ 
+@@ -53,6 +54,9 @@ public enum NotificationKind {
+     public static NotificationKind forEvent(DomainEvent event) {
+         Objects.requireNonNull(event, "event");
+         return switch (event) {
++            // Task 3 will supply the modification template and its values.
++            case BookingModifiedEvent ignored -> throw new UnsupportedOperationException(
++                "booking-modified notification support is pending Task 3");
+             case BookingCreatedEvent ignored -> BOOKING_CONFIRMED;
+             case BookingCancelledEvent ignored -> BOOKING_CANCELLED;
+             case WaitlistPromotedEvent ignored -> WAITLIST_PROMOTED;
+diff --git a/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationService.java b/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationService.java
+index 781972a..52c7ce4 100644
+--- a/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationService.java
++++ b/notifications/src/main/java/edu/cmu/cs214/campusreserve/notifications/NotificationService.java
+@@ -3,6 +3,7 @@ package edu.cmu.cs214.campusreserve.notifications;
+ import edu.cmu.cs214.campusreserve.core.events.BookingCancelledEvent;
+ import edu.cmu.cs214.campusreserve.core.events.BookingCreatedEvent;
+ import edu.cmu.cs214.campusreserve.core.events.DomainEvent;
++import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
+ import edu.cmu.cs214.campusreserve.core.events.WaitlistPromotedEvent;
+ import edu.cmu.cs214.campusreserve.core.ports.EventPublisher;
+ import edu.cmu.cs214.campusreserve.notifications.templates.MessageTemplate;
+@@ -140,6 +141,9 @@ public final class NotificationService implements EventPublisher {
+         String name = recipient.greetingName();
+         String when = IntervalText.formatUtc(event.interval());
+         return switch (event) {
++            // Task 3 will supply the modification template and its values.
++            case BookingModifiedEvent ignored -> throw new UnsupportedOperationException(
++                "booking-modified notification support is pending Task 3");
+             case BookingCreatedEvent created -> Map.of(
+                 Placeholders.NAME, name,
+                 Placeholders.ROOM_ID, created.roomId(),
+diff --git a/notifications/src/test/java/edu/cmu/cs214/campusreserve/notifications/ModificationPendingTest.java b/notifications/src/test/java/edu/cmu/cs214/campusreserve/notifications/ModificationPendingTest.java
+new file mode 100644
+index 0000000..85e2015
+--- /dev/null
++++ b/notifications/src/test/java/edu/cmu/cs214/campusreserve/notifications/ModificationPendingTest.java
+@@ -0,0 +1,27 @@
++package edu.cmu.cs214.campusreserve.notifications;
++
++import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
++import edu.cmu.cs214.campusreserve.notifications.support.Fixtures;
++import java.time.Clock;
++import org.junit.jupiter.api.Test;
++import static org.junit.jupiter.api.Assertions.*;
++
++/** Task 1 compatibility checkpoint; Task 3 replaces pending support with delivery. */
++class ModificationPendingTest {
++    @Test
++    void pendingModificationIsRecordedWithoutFailingPublisherOrSendingWrongMessage() {
++        var created = Fixtures.created();
++        var event = new BookingModifiedEvent(created.occurredAt(), created.bookingId(),
++            created.roomId(), created.userId(), created.interval(), 6, created.interval(), 4);
++        var outbox = new InMemoryOutbox();
++        var service = new NotificationService(Fixtures.directory(), outbox, Clock.systemUTC());
++        assertDoesNotThrow(() -> service.publish(event));
++        assertEquals(0, service.queuedCount());
++        assertTrue(outbox.pending().isEmpty());
++        assertEquals(1, service.skippedCount());
++        assertEquals("booking-modified", service.skipped().getFirst().eventType());
++        assertEquals(event.bookingId(), service.skipped().getFirst().bookingId());
++        assertEquals("booking-modified notification support is pending Task 3",
++            service.skipped().getFirst().reason());
++    }
++}

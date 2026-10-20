@@ -76,7 +76,9 @@ or fail on, delivery.
 
 - Only `storage` writes the event log. `EventLogFormat` is the single place the
   line shape is decided, and the event types (currently `booking-created`,
-  `booking-cancelled`, and `waitlist-promoted`) are declared in `core-domain`.
+  `booking-cancelled`, `waitlist-promoted`, and `booking-modified`) are declared in `core-domain`.
+  The modification event is declared by Task 1; its log-format registration and
+  Python reader support are pending Task 2, so the full event contract is not yet complete.
 - Only `analytics` reads `events.jsonl`. The Python package never opens a Java
   store, never imports Java, and never writes the log back.
 - The Java side writes JSON by hand and parses none. There is no JSON library in

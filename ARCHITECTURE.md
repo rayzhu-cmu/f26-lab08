@@ -122,10 +122,13 @@ BookingsHandler                  BookCommand
 ## The event log
 
 `storage` owns the log. `EventLogFormat` is the one place a line's shape is
-decided, and it writes JSON by hand. The event types, currently three, are
+decided, and it writes JSON by hand. The event types, currently four, are
 declared in `core-domain` (`BookingCreatedEvent`, `BookingCancelledEvent`,
-`WaitlistPromotedEvent`) and their wire names are `booking-created`,
-`booking-cancelled`, and `waitlist-promoted`.
+`WaitlistPromotedEvent`, `BookingModifiedEvent`) and their wire names are `booking-created`,
+`booking-cancelled`, `waitlist-promoted`, and `booking-modified`.
+Task 1 declares and publishes the modification event in the domain. Task 2
+will register its wire format and add Python reader support; that integration
+is not complete yet. The HTTP modification surface is also pending.
 
 Two writers ship:
 

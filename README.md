@@ -90,3 +90,7 @@ python -m campusreserve_analytics revenue --events ../events.jsonl --format csv
 - Where your answers go: `PLAN.md`
 - Guardrail recipes: `guardrails/README.md`
 - CI: `.github/workflows/ci.yml`, which runs the same two commands as above.
+
+## Lab 8 tooling
+
+Tool/model used for Lab 8: Codex desktop with GPT-6 (including a fresh-context refuter agent).

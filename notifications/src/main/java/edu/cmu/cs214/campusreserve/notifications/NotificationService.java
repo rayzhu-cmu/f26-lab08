@@ -3,6 +3,7 @@ package edu.cmu.cs214.campusreserve.notifications;
 import edu.cmu.cs214.campusreserve.core.events.BookingCancelledEvent;
 import edu.cmu.cs214.campusreserve.core.events.BookingCreatedEvent;
 import edu.cmu.cs214.campusreserve.core.events.DomainEvent;
+import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
 import edu.cmu.cs214.campusreserve.core.events.WaitlistPromotedEvent;
 import edu.cmu.cs214.campusreserve.core.ports.EventPublisher;
 import edu.cmu.cs214.campusreserve.notifications.templates.MessageTemplate;
@@ -140,6 +141,9 @@ public final class NotificationService implements EventPublisher {
         String name = recipient.greetingName();
         String when = IntervalText.formatUtc(event.interval());
         return switch (event) {
+            // Task 3 will supply the modification template and its values.
+            case BookingModifiedEvent ignored -> throw new UnsupportedOperationException(
+                "booking-modified notification support is pending Task 3");
             case BookingCreatedEvent created -> Map.of(
                 Placeholders.NAME, name,
                 Placeholders.ROOM_ID, created.roomId(),

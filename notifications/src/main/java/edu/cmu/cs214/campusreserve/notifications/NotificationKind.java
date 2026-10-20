@@ -3,6 +3,7 @@ package edu.cmu.cs214.campusreserve.notifications;
 import edu.cmu.cs214.campusreserve.core.events.BookingCancelledEvent;
 import edu.cmu.cs214.campusreserve.core.events.BookingCreatedEvent;
 import edu.cmu.cs214.campusreserve.core.events.DomainEvent;
+import edu.cmu.cs214.campusreserve.core.events.BookingModifiedEvent;
 import edu.cmu.cs214.campusreserve.core.events.WaitlistPromotedEvent;
 import java.util.Objects;
 
@@ -53,6 +54,9 @@ public enum NotificationKind {
     public static NotificationKind forEvent(DomainEvent event) {
         Objects.requireNonNull(event, "event");
         return switch (event) {
+            // Task 3 will supply the modification template and its values.
+            case BookingModifiedEvent ignored -> throw new UnsupportedOperationException(
+                "booking-modified notification support is pending Task 3");
             case BookingCreatedEvent ignored -> BOOKING_CONFIRMED;
             case BookingCancelledEvent ignored -> BOOKING_CANCELLED;
             case WaitlistPromotedEvent ignored -> WAITLIST_PROMOTED;

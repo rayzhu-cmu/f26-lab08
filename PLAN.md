@@ -14,6 +14,8 @@ Prepared before implementation. This plan covers the full change request; the la
 
 **A green-gate blind spot.** Tests might verify the latest history entry but miss aliasing: an earlier returned booking's history could change after a second modification. The refuter should retain an earlier booking reference and try repeated modifications and attempted list mutation.
 
+**Scope correction discovered during Task 1's cold build (October 20).** The original core-only implementation passed its gate but broke the exhaustive sealed-event switches in `notifications/NotificationKind.java` and `NotificationService.java`. Preserve the first failed build in `evidence/task1-clean-build-initial-failure.log`. Before repairing it, expand Task 1 only to add explicit unsupported-modification branches in these two switches and a new notification test proving that the existing skipped-event mechanism records the pending support without escaping into booking flows. Task 3 still owns the actual notification kind, values and template, and must replace this temporary pending behavior and its new test. Add `mvn -pl notifications -am test` to this revised Task 1 checkpoint. The three excluded modules and guardrail remain unchanged; do not weaken the sealed hierarchy or add a catch-all default.
+
 ### Task 2 — Carry modifications through the event log and utilization ledger
 
 **Behavior and scope.** In `storage/EventLogFormat.java`, recognize and serialize `booking-modified`, keeping the common fields as the new booking state and adding the old details consistently with Task 1. In `analytics/campusreserve_analytics/events.py`, parse the event and update the shared ledger by booking ID rather than adding another booking. Adjust utilization only if necessary. Add new tests/fixtures in both modules, and finish the event-contract descriptions in `AGENTS.md` and `ARCHITECTURE.md`. Dependencies: Task 1 and its event fields. Do not add a Java JSON dependency or a second report-specific ledger.
@@ -50,22 +52,49 @@ Prepared before implementation. This plan covers the full change request; the la
 
 **Unchanged-file verification.** The SHA-256 before and after was `b86cce3a5af06118da1820c8f101fd353c466c6c5015e57e5083fe9248370ef6`. `git diff --exit-code -- billing cli accounts` exited zero with no output. Permission inspection found zero writable protected paths across billing (40 paths), cli (38), and accounts (34); all three existing `target/` directories retained owner write permission. No build result is claimed for this configuration-only step.
 
-**Limit and current state.** The lock catches accidental writes to protected paths, not incorrect behavior in allowed files, and an agent with shell access could undo it with chmod. Pair it with a task-scope diff audit. The lock remains active for Task 1; run `guardrails/unlock.sh` after the supervised task. Git does not preserve these write-permission bits, so a fresh checkout needs the lock script run again.
+**Limit and current state.** The lock catches accidental writes to protected paths, not incorrect behavior in allowed files, and an agent with shell access could undo it with chmod. Pair it with a task-scope diff audit. The lock remained active through Task 1, refuter verification and the final cold build. After the supervised work finished, `guardrails/unlock.sh` restored write permissions to all three modules ([unlock log](evidence/guardrail-unlock.log)). Git does not preserve these write-permission bits, so a fresh checkout needs the lock script run again.
 
 ## Milestone 3: The run
 
-**Selected task.** Task 1 only: implement safe domain-level booking modification, history, promotion and the domain event, with new core-domain tests and accurate event-declaration documentation. Do not proceed to Tasks 2–4.
+**Selected task.** Task 1 only: safe domain-level booking modification, history, promotion and the domain event, with new tests and accurate event-declaration documentation. Includes the recorded minimal notification-switch compatibility correction, not Task 3 notification delivery. Tasks 2–4 were not executed.
 
 **Takeover point — specified before execution.** If the agent edits a shipped test to make the gate pass, duplicates overlap arithmetic outside `TimeInterval.overlaps`, or adds a production waitlist write outside `BookingService`, I will stop it, inspect and revert the offending change, and implement that correction myself with a new regression test before rerunning the gate. If it tries to remove the filesystem lock, I will stop the run and restore the boundary before continuing.
 
-**Evidence:** PENDING — after implementation, paste the core-domain result line from `mvn -pl core-domain -am test` and the final result line from `mvn -B clean test`. Record actual counts and results, not expected ones.
+**Evidence — executed October 20.**
 
-**Diff:** PENDING — run `git add -N .` and inspect `git diff --stat` and `git diff`. List each changed/new file and its Task 1 purpose. Record unexpected changes and whether any shipped test was touched. Quote the one line read most carefully and explain the invariant checked.
+- `mvn -pl core-domain -am test`: `[INFO] Tests run: 196, Failures: 0, Errors: 0, Skipped: 0` and `[INFO] BUILD SUCCESS` ([log](evidence/task1-gate.log)); 29 new core tests above the starter's 167.
+- Revised-scope gate `mvn -pl notifications -am test`: notifications `[INFO] Tests run: 42, Failures: 0, Errors: 0, Skipped: 0` and `[INFO] BUILD SUCCESS` ([log](evidence/task1-notifications-gate.log)); one new compatibility test.
+- Closing `mvn -B clean test`: `[INFO] BUILD SUCCESS`; all seven modules succeeded, 448 Java tests total, zero failures/errors ([log](evidence/task1-clean-build.log)).
+- The first cold build failed on the newly non-exhaustive notification switch ([original failure](evidence/task1-clean-build-initial-failure.log)); the scope correction above explains the repair. This is why the module gate alone was insufficient. No Python production code changed; no Python run is claimed in this task.
+- Guardrail remained active. No shipped test was modified, no protected module content changed, and `git diff --check` passed. No stated takeover trigger occurred.
 
-**Prepared refuter brief — not yet sent:**
+**Diff — agent audit prepared for student review.** New source/test files were included using `git add -N`; this does not commit them. Paths below use the package suffix under each module's `src/main/java/edu/cmu/cs214/campusreserve/`, unless identified as tests.
 
-> Review only Task 1: safe domain-level booking modification, history, promotion and its domain event. You receive CHANGE-REQUEST.md, the complete task diff, and this one-line scope, without the implementation session's conversation. Find concrete inputs or call sequences that violate this scope despite a green module gate. Start with repeated modifications and retained history references, then examine rejection atomicity, self-conflicts, no-ops and waitlist rechecks. Give a minimal reproducer and the relevant requirement for your strongest finding. Do not treat unimplemented HTTP, notification or log-reader integration as Task 1 defects, and do not modify shipped tests.
+| File | Mapping to scope |
+|---|---|
+| `core-domain/.../core/domain/Booking.java` | Immutable history, compatibility constructor, modified copies, history-preserving cancellation. |
+| `core-domain/.../core/domain/BookingModification.java` | Old/new details and timestamp for one history entry. |
+| `core-domain/.../core/domain/ModificationResult.java` | Typed success, promotions and rejection reason. |
+| `core-domain/.../core/events/BookingModifiedEvent.java` | New state plus old details for downstream consumers. |
+| `core-domain/.../core/events/DomainEvent.java` | Permits the new event in the sealed hierarchy. |
+| `core-domain/.../core/service/BookingService.java` | Checks before writes, self-exclusion, save/event/promotion sequence, no-op handling. |
+| `core-domain/src/test/.../core/service/BookingServiceModifyTest.java` | 29 new test cases covering rules, atomic rejection, history, conflict boundaries, promotion and publisher failure. |
+| `notifications/.../notifications/NotificationKind.java` | Unexpected original scope dependency: explicit pending-support branch restores exhaustive compilation. |
+| `notifications/.../notifications/NotificationService.java` | Same sealed-switch compatibility correction, with explicit pending support. |
+| `notifications/src/test/.../notifications/ModificationPendingTest.java` | One new test verifies pending support is recorded as skipped without emitting an incorrect message or throwing into booking flows. |
+| `AGENTS.md`, `ARCHITECTURE.md` | Event declaration lists updated; wire integration and HTTP support explicitly marked pending. |
+| `PLAN.md`, `evidence/task1-*.log` | Lab plan correction and actual execution evidence. |
 
-**Refuter execution and finding:** PENDING — after the closing build, start a fresh session with only the stated materials and record the actual brief used. Settle one finding with a new failing test and its red output, or dismiss it with a test, run, or exact requirement. If all claims fail, document the check of the strongest claim. A confirmed finding need not be fixed or committed for this lab. Remove temporary probe files and preserve the evidence.
+The notification files were the only unexpected feature-code expansion and are explained in the dated scope correction. There were no changes to shipped tests, module dependency declarations, `billing`, `cli`, `accounts`, `storage`, `analytics`, or `http-api`.
 
-**Before recitation:** Add the actual tool/model names to the fork's README, save the evidence, and make the completed work available in the fork. These final steps and Milestone 3 remain unfinished until their actual results are recorded. Milestone 2 is recorded above.
+**Line selected for close review:** `.filter(booking -> !booking.id().equals(bookingId)).toList();` in both room and owner checks in `BookingService`. The audit checks that only this booking is excluded, both calendars still use `ConflictChecker`, and no duplicate overlap arithmetic was introduced. All new conflict checks flow through the existing predicate; production waitlist writes remain in `BookingService`. Save occurs before the reused promotion pass so it sees the new interval. The student must personally inspect this line and the full diff before presenting this as their own review.
+
+**Refuter brief and context isolation.** A separate refuter was started without inherited implementation conversation after the closing clean build. Its initial materials were only `CHANGE-REQUEST.md`, the saved task diff, and the scope/request. It was allowed to inspect relevant existing source to validate claims, but not `PLAN.md` or implementation logs. The [actual prompt](evidence/refuter-brief.md) and [actual response and settlement](evidence/refuter-result.md) are saved; the task diff is the pre-refuter snapshot.
+
+**Finding settled.** No concrete defect was established. The strongest suspicion was that a later modification could mutate a retained earlier history snapshot. The refuter rejected that claim by inspecting the copying and immutable fields, then proposed an accepted → rejected → accepted sequence for stronger evidence. Added `core-domain/src/test/java/edu/cmu/cs214/campusreserve/core/service/ModificationRefuterTest.java` and verified that rejection preserves bookings/waitlist/events, retained history is unchanged after another successful change, and the final history has exactly two accepted changes. This new test is the only post-review code addition; no production or shipped test was changed.
+
+**Verification evidence.** `mvn -pl core-domain -am -Dtest=ModificationRefuterTest test` returned `[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0` and `[INFO] BUILD SUCCESS` ([log](evidence/refuter-verification.log)). This dismisses the concrete suspicion under clauses 2 and 5; it is not a claim that the whole feature has no bugs. No failure was fabricated. The refuter created no temporary probe files. Keep the new test as regression coverage.
+
+**Final post-refuter build and cleanup.** After adding the verification test, `mvn -B clean test` passed again: core-domain 197 tests; all seven modules 449 tests total, zero failures/errors ([log](evidence/post-refuter-clean-build.log)). The earlier 448-test log remains the pre-refuter checkpoint. The filesystem lock stayed active through this final build and was then released using the supplied unlock script. Protected module contents remain unchanged. The README tooling disclosure and refuter evidence are lab bookkeeping additions.
+
+**Before recitation:** The README records Codex desktop and GPT-6 (model name confirmed by the student). All three milestone records and the refuter settlement are now populated. The student must still personally review the diff and the selected line, understand the recorded scope correction, and commit/push the work to their fork for the TA. No human review, commit, push or TA acceptance is claimed by this document.
