@@ -44,15 +44,13 @@ Prepared before implementation. This plan covers the full change request; the la
 
 ## Milestone 2: The guardrail
 
-**Planned recipe — not yet configured or demonstrated.** Use Recipe C from `guardrails/README.md`. Replace the placeholder in `guardrails/protected-trees.txt` with `billing`, `cli`, and `accounts`. It will protect each module's `src/` tree and `pom.xml`, leaving `target/` writable. Run `guardrails/lockdown.sh --list`, then `guardrails/lockdown.sh` before the task. `PLAN.md`, guardrail configuration, and the later README tool/model disclosure are lab bookkeeping outside feature-code scope.
+**Recipe — configured and demonstrated on October 20, 2026.** Recipe C from `guardrails/README.md`. `guardrails/protected-trees.txt` now lists `billing`, `cli`, and `accounts`. Ran `guardrails/lockdown.sh --list` and `guardrails/lockdown.sh`, which reported all three trees locked. Exact protected paths: `billing/src/`, `billing/pom.xml`, `cli/src/`, `cli/pom.xml`, `accounts/src/`, and `accounts/pom.xml`. Their `target/` directories remain writable. `PLAN.md`, the guardrail configuration/evidence, and the later README disclosure are lab bookkeeping outside feature-code scope.
 
-**Demonstration to perform.** Select an existing source file under `billing/src/`. Ask the agent to add a harmless comment without changing permissions. Capture the request, the agent's actual tool call, and the permission-denied result together. Verify the file is unchanged. A voluntary refusal or a bare terminal error is not the required evidence. Do not unlock or bypass the boundary during the task; run `guardrails/unlock.sh` after the supervised work.
+**Captured block.** See [the actual agent-turn excerpt](evidence/guardrail-block.md): it includes the user's request, the agent's announced concrete write attempt, the actual tool invocation, and its returned traceback. The agent attempted to append a harmless comment to `billing/src/main/java/edu/cmu/cs214/campusreserve/billing/InvoiceOutcome.java`, without changing permissions. The filesystem returned `PermissionError: [Errno 13] Permission denied` and exit code 1. This was a real write attempt, not a voluntary refusal. Recipe C was exercised through a shell subprocess; the Claude-specific Manual-mode setup for Recipes A/B was not applicable.
 
-**Limit.** This lock catches accidental writes to those paths, not incorrect behavior in allowed files, and an agent with shell access could undo it with chmod. Pair it with the task-scope diff audit.
+**Unchanged-file verification.** The SHA-256 before and after was `b86cce3a5af06118da1820c8f101fd353c466c6c5015e57e5083fe9248370ef6`. `git diff --exit-code -- billing cli accounts` exited zero with no output. Permission inspection found zero writable protected paths across billing (40 paths), cli (38), and accounts (34); all three existing `target/` directories retained owner write permission. No build result is claimed for this configuration-only step.
 
-**Captured block:** PENDING — paste the actual agent-turn excerpt after the demonstration.
-
-**Unchanged-file verification:** PENDING — record the actual check and result.
+**Limit and current state.** The lock catches accidental writes to protected paths, not incorrect behavior in allowed files, and an agent with shell access could undo it with chmod. Pair it with a task-scope diff audit. The lock remains active for Task 1; run `guardrails/unlock.sh` after the supervised task. Git does not preserve these write-permission bits, so a fresh checkout needs the lock script run again.
 
 ## Milestone 3: The run
 
@@ -70,4 +68,4 @@ Prepared before implementation. This plan covers the full change request; the la
 
 **Refuter execution and finding:** PENDING — after the closing build, start a fresh session with only the stated materials and record the actual brief used. Settle one finding with a new failing test and its red output, or dismiss it with a test, run, or exact requirement. If all claims fail, document the check of the strongest claim. A confirmed finding need not be fixed or committed for this lab. Remove temporary probe files and preserve the evidence.
 
-**Before recitation:** Add the actual tool/model names to the fork's README, save the evidence, and make the completed work available in the fork. These steps and Milestones 2–3 remain unfinished until their actual results are recorded.
+**Before recitation:** Add the actual tool/model names to the fork's README, save the evidence, and make the completed work available in the fork. These final steps and Milestone 3 remain unfinished until their actual results are recorded. Milestone 2 is recorded above.

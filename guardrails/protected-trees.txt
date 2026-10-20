@@ -1,12 +1,4 @@
-# Trees that lockdown.sh makes read-only, one path per line, relative to the
-# repository root. Blank lines and lines starting with # are ignored.
-#
-# EDIT THIS LIST. It ships with an obviously wrong placeholder so an unedited
-# list cannot pass for a working guardrail. lockdown.sh refuses to run while the
-# placeholder is still here.
-#
-# Entries have to be relative, must not contain "..", and must resolve inside
-# this repository. lockdown.sh locks each entry's src/ directory and its
-# pom.xml, and leaves target/ writable so every gate still runs while locked.
-
-MODULE-YOU-ARE-NOT-TOUCHING
+# Out-of-scope modules from PLAN.md; lock src/ and pom.xml only.
+billing
+cli
+accounts
